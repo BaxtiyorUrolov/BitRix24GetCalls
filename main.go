@@ -16,7 +16,7 @@ import (
 
 // Bitrix24 va Telegram konfiguratsiyasi
 var (
-	bitrixAPIURL = "https://visainfo.bitrix24.ru/rest/1/cnrbvh682ozxjlx6"
+	bitrixAPIURL = "https://yourdomain.bitrix24.ru/rest/1/"
 )
 
 // Audio fayl strukturalari
@@ -129,7 +129,182 @@ func getCallInfo(callID string) (*models.CallInfo, error) {
 	return &callInfo, nil
 }
 
-// Audiolarni yuklab olish
+func main() {
+	connStr := "user=godb password=0208 dbname=bitrix sslmode=disable"
+	db, err := storage.OpenDatabase(connStr)
+	if err != nil {
+		log.Fatal("❌ Database connection failed: ", err)
+	}
+	defer db.Close()
+
+	folderID := "521316" // O'zgartiring
+
+	// Dastur ishga tushganda eski fayllarni yuklaydi
+	checkAndDownloadNewFiles(db, folderID)
+
+	// Har 1 soatda yangi fayllarni yuklab olish uchun avtomatik ishga tushadi
+	go startAutoDownload(db, folderID)
+
+	select {} // Dastur doimiy ishlashda davom etadi
+}
+
+// 📥 **Yangi fayllarni yuklab olish**
+func checkAndDownloadNewFiles(db *sql.DB, folderID string) {
+	fmt.Println("🔍 Yangi fayllar tekshirilmoqda...")
+
+	// Fayllarni olish
+	allFiles, err := getAllAudioFiles(folderID)
+	if err != nil {
+		fmt.Println("❌ Audio fayllarni olishda xatolik:", err)
+		return
+	}
+
+	// Mavjud fayllar ID'larini olish
+	lastFileID, err := storage.GetLastDownloadedFileID(db)
+	if err != nil {
+		fmt.Println("❌ Mavjud fayllarni olishda xatolik:", err)
+		return
+	}
+
+	// Agar yangi fayllarni aniqlashda hech qanday fayl topilmasa, mavjud fayllarni bo'sh qilib olish
+	existingFiles := make(map[string]bool)
+	if lastFileID != "" {
+		existingFiles[lastFileID] = true
+	}
+
+	// Yangi fayllarni filtrlash
+	newFiles := filterNewFiles(allFiles, existingFiles)
+
+	if len(newFiles) == 0 {
+		fmt.Println("📭 Yangi fayl topilmadi.")
+		return
+	}
+
+	fmt.Printf("✅ Yangi yuklanadigan fayllar soni: %d\n", len(newFiles))
+
+	// Yangi fayllarni yuklash va qayta ishlash
+	downloadAndProcessFiles(newFiles, db, folderID)
+}
+
+// ⏳ **Avtomatik yangi fayllarni yuklab borish**
+func startAutoDownload(db *sql.DB, folderID string) {
+	ticker := time.NewTicker(1 * time.Hour) // ⏳ Har 1 soatda ishga tushadi
+	defer ticker.Stop()
+
+	for {
+		<-ticker.C
+		checkAndDownloadNewFiles(db, folderID)
+	}
+}
+
+// 🎯 **Yangi fayllarni aniqlash**
+func filterNewFiles(allFiles []AudioFile, existingFiles map[string]bool) []AudioFile {
+	var newFiles []AudioFile
+	for _, file := range allFiles {
+		if _, exists := existingFiles[file.ID]; !exists {
+			newFiles = append(newFiles, file)
+		}
+	}
+	return newFiles
+}
+
+// 🔽 **Yangi fayllarni yuklab qayta ishlash**
+func downloadAndProcessFiles(audioFiles []AudioFile, db *sql.DB, folderID string) {
+	for _, audio := range audioFiles {
+		fmt.Println("⬇️ Yuklanmoqda:", audio.Name)
+
+		callInfo, err := getCallInfo(audio.ID)
+		if err != nil {
+			fmt.Println("❌ Qo‘ng‘iroq ma’lumotlarini olishda xatolik:", err)
+			continue
+		}
+
+		err = storage.InsertCallInfo(callInfo, db)
+		if err != nil {
+			fmt.Println("❌ CallInfo saqlashda xatolik:", err)
+		}
+
+		audioPath, err := downloadAudio(audio.DownloadURL, audio.Name)
+		if err != nil {
+			fmt.Println("❌ Audio yuklab olishda xatolik:", err)
+			continue
+		}
+
+		userInfo, err := getUserInfo(callInfo.PortalUserID)
+		if err != nil {
+			fmt.Println("❌ Foydalanuvchini olishda xatolik:", err)
+			userInfo = &models.User{Name: "Noma’lum", LastName: ""}
+		}
+
+		err = storage.InsertUser(userInfo, db)
+		if err != nil {
+			fmt.Println("❌ Foydalanuvchini saqlashda xatolik:", err)
+		}
+
+		monthInfo, err := getMonthInfo(folderID, callInfo.ID)
+		if err != nil {
+			fmt.Println("❌ Oylik ma’lumotlarni olishda xatolik:", err)
+		}
+
+		err = storage.InsertMonth(monthInfo, db)
+		if err != nil {
+			fmt.Println("❌ Oylarni saqlashda xatolik:", err)
+		}
+
+		total := models.Total{
+			AudioPath: audioPath,
+			UserID:    userInfo.ID,
+			CallID:    callInfo.ID,
+		}
+
+		err = storage.InsertTotal(total, db)
+		if err != nil {
+			fmt.Println("❌ Total saqlashda xatolik:", err)
+		}
+	}
+}
+
+// 📂 **Bitrix24'dan barcha fayllarni olish**
+func getAllAudioFiles(folderID string) ([]AudioFile, error) {
+	var allAudioFiles []AudioFile
+	offset := 0
+	limit := 50
+
+	for {
+		url := fmt.Sprintf("%s/disk.folder.getchildren?id=%s&navParams[OFFSET]=%d&navParams[LIMIT]=%d", bitrixAPIURL, folderID, offset, limit)
+		resp, err := http.Get(url)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+
+		var response struct {
+			Result []AudioFile `json:"result"`
+			Total  int         `json:"total"`
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+			return nil, err
+		}
+
+		if len(response.Result) == 0 {
+			break
+		}
+
+		allAudioFiles = append(allAudioFiles, response.Result...)
+		offset += limit
+
+		time.Sleep(2 * time.Second)
+
+		if len(allAudioFiles) >= response.Total {
+			break
+		}
+	}
+
+	return allAudioFiles, nil
+}
+
+// 📥 **Audiolarni yuklab olish**
 func downloadAudio(url, fileName string) (string, error) {
 	resp, err := http.Get(url)
 	if err != nil {
@@ -152,176 +327,4 @@ func downloadAudio(url, fileName string) (string, error) {
 	}
 
 	return filePath, nil
-}
-
-// Asosiy funksiya
-func main() {
-
-	connStr := "user=godb password=0208 dbname=bitrix sslmode=disable"
-	db, err := storage.OpenDatabase(connStr)
-	if err != nil {
-		log.Fatal("❌ Database connection failed: ", err)
-	}
-	defer db.Close()
-
-	folderID := "521316" // O'zgartiring
-
-	// 1️⃣ Bitrix24'dan barcha audio fayllarni olish
-	audioFiles, err := getAllAudioFiles(folderID)
-	if err != nil {
-		fmt.Println("❌ Audio fayllarni olishda xatolik:", err)
-		return
-	}
-
-	for _, audio := range audioFiles {
-		fmt.Println("⬇️ Yuklanmoqda:", audio.Name)
-
-		// ✅ Qo‘ng‘iroq ID ni olish
-		callInfo, err := getCallInfo(audio.ID)
-		if err != nil {
-			fmt.Println("❌ Qo‘ng‘iroq ma’lumotlarini olishda xatolik:", err)
-			continue
-		}
-
-		err = storage.InsertCallInfo(callInfo, db)
-		if err != nil {
-			fmt.Println("❌ CallInfo saqlashda xatolik:", err)
-		}
-
-		// 🔽 Audio yuklab olish
-		audioPath, err := downloadAudio(audio.DownloadURL, audio.Name)
-		if err != nil {
-			fmt.Println("❌ Audio yuklab olishda xatolik:", err)
-			continue
-		}
-
-		//go startAutoDownload(db, folderID)
-
-		// 👤 Foydalanuvchi ma’lumotlarini olish
-		userInfo, err := getUserInfo(callInfo.PortalUserID)
-		if err != nil {
-			fmt.Println("❌ Foydalanuvchini olishda xatolik:", err)
-			userInfo = &models.User{Name: "Noma’lum", LastName: ""}
-		}
-
-		err = storage.InsertUser(userInfo, db)
-		if err != nil {
-			fmt.Println("Foydalanuvchini saqlashda xatolik:", err)
-		}
-
-		monthInfo, err := getMonthInfo(folderID, callInfo.ID)
-		if err != nil {
-			fmt.Println("oylar ruyxatini olishda xatolik:", err)
-		}
-
-		err = storage.InsertMonth(monthInfo, db)
-		if err != nil {
-			fmt.Println("oylarni saqlashda xatolik: ", err)
-		}
-
-		total := models.Total{
-			AudioPath: audioPath,
-			UserID:    userInfo.ID,
-			CallID:    callInfo.ID,
-		}
-
-		err = storage.InsertTotal(total, db)
-		if err != nil {
-			fmt.Println("total saqlashda xatolik: ", err)
-		}
-
-	}
-}
-
-func getAllAudioFiles(folderID string) ([]AudioFile, error) {
-	var allAudioFiles []AudioFile
-	offset := 0
-	limit := 50 // Har safar 50 ta fayl yuklaymiz
-
-	for {
-		url := fmt.Sprintf("%s/disk.folder.getchildren?id=%s&navParams[OFFSET]=%d&navParams[LIMIT]=%d", bitrixAPIURL, folderID, offset, limit)
-		resp, err := http.Get(url)
-		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
-
-		var response BitrixResponse
-		if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-			return nil, err
-		}
-
-		// Agar yangi fayllar bo'lmasa, to'xtaymiz
-		if len(response.Result) == 0 {
-			break
-		}
-
-		allAudioFiles = append(allAudioFiles, response.Result...)
-
-		// Keyingi sahifaga o'tish
-		offset += limit
-		fmt.Printf("✅ Yuklangan fayllar soni: %d\n", len(allAudioFiles))
-
-		time.Sleep(2 * time.Second)
-
-		// Agar yuklangan fayllar umumiy soniga yetib kelsa, to‘xtaymiz
-		if len(allAudioFiles) >= response.Total {
-			break
-		}
-	}
-
-	return allAudioFiles, nil
-}
-
-func getNewAudioFiles(db *sql.DB, folderID string) ([]AudioFile, error) {
-	lastFileID, err := storage.GetLastDownloadedFileID(db)
-	if err != nil {
-		return nil, err
-	}
-
-	allFiles, err := getAllAudioFiles(folderID) // Bitrixdan barcha fayllarni olamiz
-	if err != nil {
-		return nil, err
-	}
-
-	var newFiles []AudioFile
-	for _, file := range allFiles {
-		if file.ID > lastFileID { // Faqat oxirgi yuklanganidan keyin kelganlarini olamiz
-			newFiles = append(newFiles, file)
-		}
-	}
-
-	// Agar yangi fayllar bo‘lsa, oxirgi yuklangan faylni yangilaymiz
-	if len(newFiles) > 0 {
-		newLastFileID := newFiles[len(newFiles)-1].ID
-		err := storage.UpdateLastDownloadedFileID(db, newLastFileID)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return newFiles, nil
-}
-
-func startAutoDownload(db *sql.DB, folderID string) {
-	ticker := time.NewTicker(1 * time.Hour) // ⏳ Har 1 soatda ishga tushadi
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			fmt.Println("🔄 Yangi fayllarni tekshiryapman...")
-			newFiles, err := getNewAudioFiles(db, folderID)
-			if err != nil {
-				fmt.Println("⚠️ Xatolik:", err)
-				continue
-			}
-
-			if len(newFiles) > 0 {
-				fmt.Printf("✅ Yangi yuklangan fayllar soni: %d\n", len(newFiles))
-			} else {
-				fmt.Println("📭 Yangi fayl topilmadi.")
-			}
-		}
-	}
 }

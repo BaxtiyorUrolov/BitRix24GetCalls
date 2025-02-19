@@ -40,9 +40,8 @@ func InsertCallInfo(call *models.CallInfo, db *sql.DB) error {
 	rowsAffected, _ := result.RowsAffected()
 	if rowsAffected == 0 {
 		log.Printf("⚠️ CallInfo (ID: %s) allaqachon mavjud, qo‘shilmadi", call.ID)
-	} else {
-		log.Printf("✅ CallInfo saqlandi (ID: %s)", call.ID)
 	}
+
 	return nil
 }
 
@@ -77,9 +76,8 @@ func InsertUser(user *models.User, db *sql.DB) error {
 	rowsAffected, _ := result.RowsAffected()
 	if rowsAffected == 0 {
 		log.Printf("⚠️ User (ID: %s) allaqachon mavjud, qo‘shilmadi", user.ID)
-	} else {
-		log.Printf("✅ User saqlandi (ID: %s)", user.ID)
 	}
+
 	return nil
 }
 
@@ -107,17 +105,12 @@ func InsertMonth(month *models.Month, db *sql.DB) error {
 	rowsAffected, _ := result.RowsAffected()
 	if rowsAffected == 0 {
 		log.Printf("⚠️ Month (ID: %s) allaqachon mavjud, qo‘shilmadi", month.ID)
-	} else {
-		log.Printf("✅ Month saqlandi (ID: %s)", month.ID)
 	}
+
 	return nil
 }
 
 func InsertTotal(total models.Total, db *sql.DB) error {
-
-	fmt.Println("UserID: ", total.UserID)
-	fmt.Println("CallID: ", total.CallID)
-	fmt.Println("path", total.AudioPath)
 
 	query := `
 		INSERT INTO total (audio_path, call_id, user_id)
@@ -140,16 +133,11 @@ func InsertTotal(total models.Total, db *sql.DB) error {
 
 func GetLastDownloadedFileID(db *sql.DB) (string, error) {
 	var lastFileID string
-	err := db.QueryRow("SELECT last_downloaded_file_id FROM audio_log LIMIT 1").Scan(&lastFileID)
+	err := db.QueryRow("SELECT call_id FROM total ORDER BY call_id DESC LIMIT 1").Scan(&lastFileID)
 	if err == sql.ErrNoRows {
-		return "", nil // Agar hech qanday ma'lumot bo‘lmasa, bo‘sh qaytaradi
+		return "", nil // Agar hech narsa topilmasa, bo'sh string qaytarish
 	} else if err != nil {
 		return "", err
 	}
 	return lastFileID, nil
-}
-
-func UpdateLastDownloadedFileID(db *sql.DB, newFileID string) error {
-	_, err := db.Exec("UPDATE audio_log SET last_downloaded_file_id = $1", newFileID)
-	return err
 }
