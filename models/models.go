@@ -1,5 +1,19 @@
 package models
 
+import "time"
+
+// --- Bitrixdan olinadigan token ma'lumotlari ---
+type TokenInfo struct {
+	ID             int
+	PortalDomain   string
+	MemberID       string
+	AccessToken    string
+	RefreshToken   string
+	ExpiresIn      int
+	Scope          string
+	LastUpdate     time.Time
+	ClientEndpoint string
+}
 type User struct {
 	ID               string   `json:"id"`
 	XML_ID           string   `json:"xml_id"`
@@ -80,4 +94,16 @@ type Total struct {
 	AudioPath string `json:"audio_path"`
 	CallID    string `json:"call_id"`
 	UserID    string `json:"user_id"`
+}
+
+type PortalInfo struct {
+	MemberID       string
+	Domain         string
+	AccessToken    string
+	RefreshToken   string
+	ExpiresIn      int
+	Scope          string
+	LastUpdate     time.Time
+	ClientEndpoint string
+	FolderID       string
 }

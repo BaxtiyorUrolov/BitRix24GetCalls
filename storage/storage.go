@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"time"
 )
 
 // CallInfo ma'lumotlarini saqlash
@@ -140,4 +141,35 @@ func GetLastDownloadedFileID(db *sql.DB) (string, error) {
 		return "", err
 	}
 	return lastFileID, nil
+}
+
+// GetAllPortals - DB'dan barcha portalni (member_id, folder_id va tokenlar) olish
+func GetAllPortals(db *sql.DB) ([]models.PortalInfo, error) {
+	query := `SELECT member_id, domain, access_token, refresh_token, expires_in, scope, last_update, client_endpoint, folder_id
+              FROM portals`
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var portals []models.PortalInfo
+	for rows.Next() {
+		var p models.PortalInfo
+		var lu time.Time
+		if err := rows.Scan(
+			&p.MemberID, &p.Domain, &p.AccessToken, &p.RefreshToken, &p.ExpiresIn, &p.Scope, &lu, &p.ClientEndpoint, &p.FolderID,
+		); err != nil {
+			return nil, err
+		}
+		p.LastUpdate = lu
+		portals = append(portals, p)
+	}
+	return portals, rows.Err()
+}
+
+func UpdatePortalFolderID(db *sql.DB, memberID, folderID string) error {
+	query := `UPDATE portals SET folder_id = $1 WHERE member_id = $2`
+	_, err := db.Exec(query, folderID, memberID)
+	return err
 }

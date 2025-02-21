@@ -85,3 +85,16 @@ CREATE TABLE IF NOT EXISTS audio_log (
                                          last_downloaded_file_id VARCHAR(255) NOT NULL PRIMARY KEY
     );
 
+
+CREATE TABLE portals (
+                         id SERIAL PRIMARY KEY,
+                         member_id VARCHAR(255) UNIQUE NOT NULL,
+                         domain VARCHAR(255),
+                         access_token TEXT,
+                         refresh_token TEXT,
+                         expires_in INT,
+                         scope TEXT,
+                         last_update TIMESTAMP,
+                         client_endpoint TEXT,
+                         folder_id VARCHAR(255)  -- disk.folder.getchildren uchun
+);
