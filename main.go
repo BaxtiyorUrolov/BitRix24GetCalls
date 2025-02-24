@@ -1,11 +1,11 @@
 package main
 
 import (
+	"bitrix/models"
 	"database/sql"
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"time"
 
 	"bitrix/service"
@@ -15,26 +15,32 @@ import (
 )
 
 var (
-	clientID     = os.Getenv("BITRIX_CLIENT_ID")
-	clientSecret = os.Getenv("BITRIX_CLIENT_SECRET")
-	redirectURI  = os.Getenv("BITRIX_REDIRECT_URI")
+	clientID     = "CLIENT_ID"
+	clientSecret = "CLIENT_SECRET"
+	redirectURI  = "REDIRECT_URI"
 )
 
 func main() {
-	// 1) Muhit
+	// 1) Muhitni tekshirish
 	if clientID == "" || clientSecret == "" || redirectURI == "" {
-		log.Fatal("BITRIX_CLIENT_ID, BITRIX_CLIENT_SECRET, BITRIX_REDIRECT_URI yo'q!")
+		log.Fatal("Iltimos, BITRIX_CLIENT_ID, BITRIX_CLIENT_SECRET, BITRIX_REDIRECT_URI ni environmentda sozlang.")
 	}
 
 	// 2) DB ga ulanish
-	connStr := "user=godb password=0208 dbname=bitrix sslmode=disable"
+	connStr := "user=godb password=0208 dbname=bitrix sslmode=disable" // misol: "user=godb password=0208 dbname=bitrix sslmode=disable"
 	db, err := storage.OpenDatabase(connStr)
 	if err != nil {
 		log.Fatal("DB connection xatolik:", err)
 	}
 	defer db.Close()
 
-	// 3) /bitrix/oauth - har bir portal o‘rnatganda code keladi
+	// 3) "/" – oddiy sahifa (test uchun)
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "Welcome to My Bitrix24 Install + Call Records App!\n")
+		fmt.Fprintf(w, "client_id: %s\nredirect_uri: %s\n", clientID, redirectURI)
+	})
+
+	// 4) "/bitrix/oauth" – Bitrix24 ilovasini o‘rnatish (install) paytida code keladi
 	http.HandleFunc("/bitrix/oauth", func(w http.ResponseWriter, r *http.Request) {
 		code := r.URL.Query().Get("code")
 		if code == "" {
@@ -42,87 +48,114 @@ func main() {
 			return
 		}
 
-		// code → token
+		// code -> token (access_token, refresh_token, ...)
 		tokenInfo, err := service.ExchangeCodeForToken(db, code, clientID, clientSecret, redirectURI)
 		if err != nil {
 			http.Error(w, "Token exchange error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		// Bu yerda folderIDni qanday aniqlash?
-		// Masalan, default folderID= "521316" yoki userdan so'rash
-		// Demo uchun statik:
+		// Demo uchun folderID ni statik qilamiz (disk.folder ID)
 		folderID := "521316"
-
-		// DB'da portals jadvaliga folderID'ni yangilash
-		// (InsertOrUpdatePortal) - biz oldin InsertOrUpdateToken qilganmiz,
-		// endi folderID ham saqlaymiz. Soddalashtirish uchun:
+		// DB da folderID saqlash (portals jadvalida)
 		if err := storage.UpdatePortalFolderID(db, tokenInfo.MemberID, folderID); err != nil {
 			log.Println("FolderID saqlashda xatolik:", err)
 		}
 
-		fmt.Fprintf(w, "Token olindi! MemberID: %s, Domain: %s, FolderID: %s\n",
-			tokenInfo.MemberID, tokenInfo.PortalDomain, folderID)
+		// Install muvaffaqiyatli bo'ldi
+		fmt.Fprintf(w, "✅ Ilova muvaffaqiyatli o‘rnatildi!\n")
+		fmt.Fprintf(w, "MemberID: %s\nDomain: %s\n", tokenInfo.MemberID, tokenInfo.PortalDomain)
+		fmt.Fprintf(w, "FolderID: %s\n", folderID)
 	})
 
-	// 4) Ishga tushganda har bir portal uchun goroutine
-	go startAutoForAllPortals(db)
+	// 5) Avtomatik call records yuklab olish (har 1 soatda)
+	go startAutoDownload(db)
 
-	// 5) Server
-	port := ":8080"
-	log.Println("Server running on", port)
+	// 6) Serverni ishga tushirish
+	port := ":8090"
+	log.Printf("Server running on %s...", port)
 	log.Fatal(http.ListenAndServe(port, nil))
 }
 
-// startAutoForAllPortals - har 1 soatda BARCHA portalni ketma-ket tekshiradi
-func startAutoForAllPortals(db *sql.DB) {
+// startAutoDownload – har 1 soatda call recordlarni yuklab olish
+func startAutoDownload(db *sql.DB) {
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()
 
 	for {
-		// Har safar ticker bo'lganda, DB dan portals ro'yxatini qayta o'qiymiz
 		portals, err := storage.GetAllPortals(db)
 		if err != nil {
 			log.Println("GetAllPortals xatolik:", err)
+			<-ticker.C
 			continue
 		}
 		log.Printf("Portal soni: %d\n", len(portals))
 
-		// Har bir portal uchun audio yuklab olish
+		// Har bir portal uchun
 		for _, p := range portals {
-			checkAndDownloadNewFiles(db, p.MemberID, p.FolderID)
+			checkAndDownloadRecords(db, p.MemberID, p.FolderID)
 		}
 
 		<-ticker.C
 	}
 }
 
-// checkAndDownloadNewFiles - har bir portal + folder bo'yicha audio yuklab, DB ga yozish
-func checkAndDownloadNewFiles(db *sql.DB, memberID, folderID string) {
-	log.Printf("🔍 Portal: %s, folder: %s -> Yangi fayllar tekshirilmoqda...", memberID, folderID)
+// checkAndDownloadRecords – call recordlarni yuklab, DB ga yozish
+func checkAndDownloadRecords(db *sql.DB, memberID, folderID string) {
+	log.Printf("🔍 Portal %s, folder %s – call recordlarni tekshirish...", memberID, folderID)
 
+	// 1) Disk papkadan audio fayllar
 	audioFiles, err := service.GetAllAudioFiles(db, memberID, folderID, clientID, clientSecret)
 	if err != nil {
 		log.Println("GetAllAudioFiles xatolik:", err)
 		return
 	}
 	if len(audioFiles) == 0 {
-		log.Println("📭 Yangi fayl topilmadi.")
+		log.Println("📭 Yangi audio fayl topilmadi.")
 		return
 	}
 	log.Printf("✅ Topilgan audio fayllar soni: %d\n", len(audioFiles))
 
-	// Barcha faylni qayta ishlash
+	// 2) Har bir audio fayl uchun call info, user info, yuklab olish
 	for _, audio := range audioFiles {
-		// call info
-		_, err := service.GetCallInfo(db, memberID, audio.ID, clientID, clientSecret)
+		callInfo, err := service.GetCallInfo(db, memberID, audio.ID, clientID, clientSecret)
 		if err != nil {
 			log.Println("GetCallInfo xatolik:", err)
 			continue
 		}
-		// DB ga call_info yozish, audio yuklab olish, user.get, va hokazo
-		// (Sizning oldingi InsertCallInfo, InsertUser, InsertTotal va h.k.)
-		// ...
-		log.Printf("⬇️ Yuklab olingan fayl ID: %s (portal: %s)", audio.ID, memberID)
+		// DB ga call_info yozish
+		if err := storage.InsertCallInfo(callInfo, db); err != nil {
+			log.Println("InsertCallInfo xatolik:", err)
+		}
+
+		// Audio faylni yuklab olish
+		audioPath, err := service.DownloadAudio(audio.DownloadURL, audio.Name)
+		if err != nil {
+			log.Println("DownloadAudio xatolik:", err)
+			continue
+		}
+
+		// Foydalanuvchini olish
+		userInfo, err := service.GetUserInfo(db, memberID, callInfo.PortalUserID, clientID, clientSecret)
+		if err != nil {
+			log.Println("UserInfo xatolik:", err)
+			userInfo = &models.User{ID: callInfo.PortalUserID, Name: "Noma'lum"}
+		}
+		if err := storage.InsertUser(userInfo, db); err != nil {
+			log.Println("InsertUser xatolik:", err)
+		}
+
+		// Total jadvaliga yozish
+		total := models.Total{
+			AudioPath: audioPath,
+			UserID:    userInfo.ID,
+			CallID:    callInfo.ID,
+		}
+		if err := storage.InsertTotal(total, db); err != nil {
+			log.Println("InsertTotal xatolik:", err)
+		}
+
+		log.Printf("⬇️ Yuklab olingan fayl: %s, CallID: %s, UserID: %s\n",
+			audioPath, callInfo.ID, userInfo.ID)
 	}
 }
